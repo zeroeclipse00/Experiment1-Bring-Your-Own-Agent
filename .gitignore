@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+output/
+*.log
+# Local coursework documents and evidence are not public source files.
+docs/
+*.pdf
+*.docx
+*.doc
+*.bundle
