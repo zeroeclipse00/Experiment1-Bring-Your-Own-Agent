@@ -11,8 +11,8 @@ from agent.config import Settings
 from agent.runner import AgentRunner
 
 
-def test_demo_end_to_end():
-    result = asyncio.run(AgentRunner(Settings()).run("阅读 Agent 资料，安排未来3天计划，每天60分钟，从2026-10-08开始"))
+def test_demo_end_to_end(sample_data):
+    result = asyncio.run(AgentRunner(Settings(data_dir=sample_data)).run("阅读 Agent 资料，安排未来3天计划，每天60分钟，从2026-10-08开始"))
     assert not result["error"]
     assert result["mode"] == "demo"
     assert {t["tool"] for t in result["traces"]} == {"search_materials", "read_material", "analyze_reading_tasks"}
@@ -21,7 +21,7 @@ def test_demo_end_to_end():
     assert "reading_tasks.csv:2" in result["answer"]
 
 
-def test_live_function_call_wire_and_error_recovery():
+def test_live_function_call_wire_and_error_recovery(sample_data):
     requests = []
     def respond(request):
         payload = json.loads(request.content)
@@ -50,7 +50,7 @@ def test_live_function_call_wire_and_error_recovery():
             assert read["ok"] and read["data"]["excerpts"]
             message = {"role": "assistant", "content": "应用执行工具后，通过 tool_call_id 回传结果。[01_agent_basics.md:L12]"}
         return httpx.Response(200, json={"choices": [{"message": message, "finish_reason": "stop"}]})
-    settings = Settings(mode="live", api_key="test-only-key", model="mock-model")
+    settings = Settings(data_dir=sample_data, mode="live", api_key="test-only-key", model="mock-model")
     result = asyncio.run(AgentRunner(settings, LiveBrain(settings, httpx.MockTransport(respond))).run("解释 Agent 工具调用"))
     assert not result["error"] and len(requests) == 3
     assert result["created_at"].endswith("+08:00")
@@ -72,19 +72,19 @@ def test_no_tool_answer_is_not_accepted():
     assert result["error"] and result["answer"] == ""
 
 
-def test_loop_limit():
+def test_loop_limit(sample_data):
     class Forever:
         async def complete(self, messages, tools):
             return {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "x", "type": "function", "function": {"name": "search_materials", "arguments": '{"query":"Agent","limit":1}'}}
             ]}
-    result = asyncio.run(AgentRunner(replace(Settings(), max_calls=1), Forever()).run("问题"))
+    result = asyncio.run(AgentRunner(Settings(data_dir=sample_data, max_calls=1), Forever()).run("问题"))
     assert "调用次数上限" in result["error"]
     assert len(result["traces"]) == 1
 
 
-def test_api_health_run_and_validation():
-    with TestClient(create_app(Settings())) as client:
+def test_api_health_run_and_validation(sample_data):
+    with TestClient(create_app(Settings(data_dir=sample_data))) as client:
         assert client.get("/").status_code == 200
         health = client.get("/api/health").json()
         assert len(health["tools"]) == 3 and len(health["materials"]) >= 3

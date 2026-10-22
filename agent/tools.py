@@ -32,9 +32,9 @@ class TaskArgs(Arguments):
 
 
 TOOL_META = {
-    "search_materials": (SearchArgs, "检索本地 library 中的 Markdown、TXT、PDF 课程资料，返回带定位的片段；不是联网搜索。"),
+    "search_materials": (SearchArgs, "检索本地 library 中的 Markdown、TXT、PDF、CSV 资料，返回带定位的片段；不是联网搜索。"),
     "read_material": (ReadArgs, "读取指定课程资料的原文行或 PDF 页，返回可引用来源。资料问答应先检索再阅读。"),
-    "analyze_reading_tasks": (TaskArgs, "解析本地 reading_tasks.csv，统计剩余工作量，按截止日期和优先级分配每日阅读时间。"),
+    "analyze_reading_tasks": (TaskArgs, "优先解析 library/reading_tasks.csv；缺少时读取 data/reading_tasks.csv。统计剩余工作量，按截止日期和优先级分配每日阅读时间。"),
 }
 
 
@@ -75,8 +75,8 @@ class ToolRegistry:
         target = (self.library / filename).resolve()
         if not target.is_relative_to(self.library) or target == self.library:
             raise ValueError("只能访问 data/library 内的资料")
-        if target.suffix.lower() not in {".md", ".txt", ".pdf"}:
-            raise ValueError("仅支持 Markdown、TXT、PDF")
+        if target.suffix.lower() not in {".md", ".txt", ".pdf", ".csv"}:
+            raise ValueError("仅支持 Markdown、TXT、PDF、CSV")
         if not target.is_file():
             raise ValueError("资料不存在，请先检索文件名")
         if target.stat().st_size > 5 * 1024 * 1024:
@@ -101,7 +101,7 @@ class ToolRegistry:
             return []
         files = []
         for path in sorted(self.library.rglob("*")):
-            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".pdf"}:
+            if path.is_file() and path.suffix.lower() in {".md", ".txt", ".pdf", ".csv"}:
                 relative = path.relative_to(self.library).as_posix()
                 try:
                     self._safe_file(relative)
@@ -166,9 +166,12 @@ class ToolRegistry:
 
     def analyze_reading_tasks(self, start_date: str, days: int, daily_minutes: int) -> dict:
         start = date.fromisoformat(start_date)
-        path = (self.data_dir / "reading_tasks.csv").resolve()
+        library_tasks = self.library / "reading_tasks.csv"
+        candidate = library_tasks if library_tasks.exists() or library_tasks.is_symlink() else self.data_dir / "reading_tasks.csv"
+        path = candidate.resolve()
         if not path.is_relative_to(self.data_dir) or not path.is_file():
-            raise ValueError("缺少 data/reading_tasks.csv 或路径不合法")
+            raise ValueError("缺少 library/reading_tasks.csv 或 data/reading_tasks.csv，或路径不合法")
+        source_file = path.relative_to(self.data_dir).as_posix()
         if path.stat().st_size > 100_000:
             raise ValueError("CSV 不能超过 100 KB")
         with path.open(encoding="utf-8-sig", newline="") as file:
@@ -204,7 +207,7 @@ class ToolRegistry:
             tasks.append({"id": row["id"], "title": row["title"], "material": row["material"],
                           "due_date": due.isoformat(), "estimated_minutes": minutes, "priority": priority,
                           "status": status, "overdue_at_start": due < start,
-                          "source": f"reading_tasks.csv:{line}"})
+                          "source": f"{source_file}:{line}"})
         tasks.sort(key=lambda t: (t["due_date"], t["priority"], t["id"]))
         remaining = {t["id"]: t["estimated_minutes"] for t in tasks}
         plan = []
@@ -218,7 +221,7 @@ class ToolRegistry:
                     budget -= spent
                     remaining[task["id"]] -= spent
             plan.append({"date": day.isoformat(), "minutes": daily_minutes - budget, "sessions": sessions})
-        return {"tasks": tasks, "remaining_minutes": sum(t["estimated_minutes"] for t in tasks),
+        return {"source_file": source_file, "tasks": tasks, "remaining_minutes": sum(t["estimated_minutes"] for t in tasks),
                 "capacity_minutes": days * daily_minutes, "daily_minutes": daily_minutes, "plan": plan,
                 "unscheduled": [{"task_id": key, "minutes": value} for key, value in remaining.items() if value],
                 "policy": "截止日期优先，同日 priority 数字越小越优先；可跨天拆分；doing 的分钟数视为剩余用时"}

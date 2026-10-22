@@ -18,7 +18,7 @@
     <div class="brand"><div class="logo">↗</div><div><strong>研读助手</strong><div class="small">READ · UNDERSTAND · PLAN</div></div></div>
     <section><div class="nav-label">工作空间</div><div class="selected"><span class="dot"></span>课程研读</div></section>
     <section><div class="nav-label">本地资料 <span id="file-count"></span></div><ul class="files" id="files"><li>正在连接资料库…</li></ul></section>
-    <section><div class="nav-label">可用技能</div><div class="tool-item"><strong>01　资料检索</strong><span>定位 Markdown / TXT / PDF</span></div><div class="tool-item"><strong>02　原文读取</strong><span>提取原文，保留行号与页码</span></div><div class="tool-item"><strong>03　任务分析与排期</strong><span>解析 CSV，计算每日阅读安排</span></div></section>
+    <section><div class="nav-label">可用技能</div><div class="tool-item"><strong>01　资料检索</strong><span>定位 Markdown / TXT / PDF / CSV</span></div><div class="tool-item"><strong>02　原文读取</strong><span>提取原文，保留行号与页码</span></div><div class="tool-item"><strong>03　任务分析与排期</strong><span>解析 CSV，计算每日阅读安排</span></div></section>
     <div class="side-footer">现代软件开发方法实验<br>实验 01 · Bring Your Own Agent<br><br><a href="/docs" target="_blank" rel="noopener">查看 API 文档 ↗</a></div>
   </aside>
   <main>
@@ -27,7 +27,7 @@
     <div class="workspace">
       <div>
         <section class="panel"><div class="panel-head"><h2><span class="step">01 / </span>描述研读目标</h2><label class="mode">运行模式 <select id="mode" aria-label="运行模式"><option value="demo">规则演示</option><option value="live">真实模型</option></select></label></div>
-          <div class="examples"><button class="chip" data-example="根据本地资料，说明 Agent 的工具调用流程。">理解工具调用 ↗</button><button class="chip" data-example="比较资料中 MCP 与 Function Calling 的上下文接入方式。">比较上下文接入 ↗</button><button class="chip" data-example="阅读 Agent 与上下文接入资料，根据任务安排未来3天的阅读计划，每天60分钟。">安排三天阅读 ↗</button></div>
+          <div class="examples" id="examples" hidden><button class="chip" data-example="根据本地资料，说明 Agent 的工具调用流程。">理解工具调用 ↗</button><button class="chip" data-example="比较资料中 MCP 与 Function Calling 的上下文接入方式。">比较上下文接入 ↗</button><button class="chip" data-example="阅读 Agent 与上下文接入资料，根据任务安排未来3天的阅读计划，每天60分钟。">安排三天阅读 ↗</button></div>
           <label for="query" hidden>研读问题</label><textarea id="query" maxlength="4000" placeholder="例如：根据本地资料解释 Function Calling，并安排未来3天的阅读计划，每天60分钟。">阅读 Agent 与上下文接入资料，根据任务安排未来3天的阅读计划，每天60分钟。</textarea>
           <div class="form-bottom"><span class="hint">先获取资料，再组织回答。<br>Ctrl / ⌘ + Enter 运行</span><button id="run" class="primary">开始研读　↗</button></div><p id="mode-note" class="mode-note">规则演示使用真实文件与工具，不调用大模型。自由提问与综合总结请使用真实模型。</p>
         </section>
@@ -42,7 +42,7 @@
   let lastResult = null, busy = false, liveReady = false;
   const names = {search_materials:'检索本地资料',read_material:'读取资料原文',analyze_reading_tasks:'分析任务与排期'};
   function node(tag, text, className){const n=document.createElement(tag); if(text!==undefined)n.textContent=text;if(className)n.className=className;return n;}
-  function modeNote(){ $('mode-note').textContent=$('mode').value==='demo'?'规则演示使用真实文件与工具，不调用大模型。自由提问与综合总结请使用真实模型。':(liveReady?'真实模型将自主选择工具，读取本地上下文并总结。':'真实模型尚未配置。请在 .env 填写密钥、模型名和 API 地址，然后重启服务。');}
+  function modeNote(){const demo=$('mode').value==='demo';$('examples').hidden=!demo;$('mode-note').textContent=demo?'规则演示使用真实文件与工具，不调用大模型。自由提问与综合总结请使用真实模型。':(liveReady?'真实模型将自主选择工具，读取本地上下文并总结。':'真实模型尚未配置。请在 .env 填写密钥、模型名和 API 地址，然后重启服务。');}
   async function health(){try{const r=await fetch('/api/health');if(!r.ok)throw Error();const d=await r.json();liveReady=d.live_ready;$('mode').value=d.default_mode;modeNote();$('connection').textContent=liveReady?'● 本地服务就绪 · 模型已配置':'● 本地服务就绪 · 演示可用';$('files').replaceChildren();for(const f of d.materials){const li=node('li');li.append(node('span','▤','file-icon'),node('span',f));$('files').append(li);}if(!d.materials.length)$('files').append(node('li','资料库为空，请添加本地文件'));$('file-count').textContent=String(d.materials.length);}catch{$('connection').textContent='服务连接失败';}}
   function renderAnswer(text){const wrap=node('div',undefined,'answer');for(const line of text.split('\n')){if(!line.trim())continue;const isH3=line.startsWith('## '),isH4=line.startsWith('### '),isBullet=line.startsWith('- ');wrap.append(node(isH3?'h3':isH4?'h4':'p',line.replace(/^#{2,3} |^- /,''),isBullet?'bullet':''));}return wrap;}
   function renderTraces(traces){$('traces').replaceChildren();$('call-count').textContent=traces.length+' CALLS';if(!traces.length)$('traces').append(node('p','没有执行工具调用。','hint'));for(const [i,t] of traces.entries()){const d=node('details',undefined,'trace-card'),s=node('summary');s.append(node('span',t.result.ok?'✓':'! ',t.result.ok?'check':'fail'),node('span',`${String(i+1).padStart(2,'0')}　${names[t.tool]||t.tool}`,'tool-name'),node('span',t.elapsed_ms+' ms','small'));const body=node('div',undefined,'trace-body');body.append(node('label',`ROUND ${t.round} · ${t.tool}`),node('pre',JSON.stringify(t.arguments,null,2)),node('label','RETURNED CONTEXT'),node('pre',JSON.stringify(t.result,null,2)));d.append(s,body);$('traces').append(d);}}

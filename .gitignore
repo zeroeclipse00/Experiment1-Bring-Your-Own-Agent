@@ -14,3 +14,4 @@ docs/
 *.docx
 *.doc
 *.bundle
+data/library/**/*.csv

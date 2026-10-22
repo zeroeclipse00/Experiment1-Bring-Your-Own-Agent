@@ -5,13 +5,12 @@ import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
 
-from agent.config import ROOT
 from agent.tools import ToolRegistry
 
 
 @pytest.fixture
-def registry():
-    return ToolRegistry(ROOT / "data")
+def registry(sample_data):
+    return ToolRegistry(sample_data)
 
 
 def test_search_read_sources(registry):
@@ -66,6 +65,27 @@ def test_context_changes_result(tmp_path):
     changed = registry.analyze_reading_tasks("2026-10-08", 1, 60)
     assert changed["remaining_minutes"] == 90
     assert changed["unscheduled"][0]["minutes"] == 30
+
+
+def test_library_csv_is_visible_and_takes_precedence(sample_data):
+    path = sample_data / "library" / "reading_tasks.csv"
+    path.write_text("id,title,material,due_date,estimated_minutes,priority,status\n"
+                    "CUSTOM,自定义教材阅读,book.pdf,2026-10-23,75,1,todo\n", encoding="utf-8-sig")
+    registry = ToolRegistry(sample_data)
+    assert "reading_tasks.csv" in registry.inventory()
+    assert registry.search_materials("自定义教材", 1)["results"][0]["filename"] == "reading_tasks.csv"
+    assert "CUSTOM" in registry.read_material("reading_tasks.csv", 2, 1)["excerpts"][0]["text"]
+    result = registry.analyze_reading_tasks("2026-10-22", 1, 60)
+    assert result["source_file"] == "library/reading_tasks.csv"
+    assert result["remaining_minutes"] == 75
+    assert result["tasks"][0]["source"] == "library/reading_tasks.csv:2"
+    assert result["unscheduled"] == [{"task_id": "CUSTOM", "minutes": 15}]
+
+
+def test_bad_library_csv_does_not_silently_use_sample_tasks(sample_data):
+    (sample_data / "library" / "reading_tasks.csv").write_text("title,minutes\nx,1\n", encoding="utf-8")
+    result = ToolRegistry(sample_data).execute("analyze_reading_tasks", '{"start_date":"2026-10-22","days":1,"daily_minutes":60}')
+    assert not result["ok"] and "缺少必要列" in result["error"]
 
 
 def test_bad_csv_and_missing_file(tmp_path):
