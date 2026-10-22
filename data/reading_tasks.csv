@@ -1,6 +1,0 @@
-id,title,material,due_date,estimated_minutes,priority,status
-R01,理解 Agent 与 Function Calling,01_agent_basics.md,2026-10-09,45,1,todo
-R02,学习上下文接入与 MCP,02_context_and_mcp.md,2026-10-10,60,1,todo
-R03,整理工具调用与资料引用笔记,01_agent_basics.md,2026-10-11,40,2,doing
-R04,完成实验展示与验收准备,03_experiment_checklist.txt,2026-10-12,70,2,todo
-R05,已完成的环境准备,03_experiment_checklist.txt,2026-10-08,20,3,done

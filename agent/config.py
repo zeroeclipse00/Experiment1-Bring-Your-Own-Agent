@@ -16,8 +16,8 @@ class Settings:
     api_key: str = ""
     model: str = ""
     timeout: float = 60
-    max_rounds: int = 8
-    max_calls: int = 24
+    max_rounds: int = 24
+    max_calls: int = 64
 
     @property
     def live_ready(self) -> bool:

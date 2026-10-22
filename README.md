@@ -1,162 +1,87 @@
 # 研读助手 Reading Agent
 
-GitHub 仓库：https://github.com/zeroeclipse00/Experiment1-Bring-Your-Own-Agent
+现代软件开发方法实验 1「Bring Your Own Agent」。Agent 根据本地资料的实际内容回答问题、规划学习主题，使用标准 Function Calling 连接模型与文件工具。
 
-现代软件开发方法实验 1「Bring Your Own Agent」。这是一个只负责**理解本地课程资料、安排阅读任务**的单用途 Agent：先用工具读取当前资料和 CSV，再回答问题或给出每日阅读安排。
+仓库：https://github.com/zeroeclipse00/Experiment1-Bring-Your-Own-Agent
 
-## 对应实验要求
+## 启动与真实模型
 
-| 要求 | 本项目实现 | 关键文件 |
-| --- | --- | --- |
-| 至少两项独立技能 | 本地资料检索；Markdown/TXT/PDF 原文解析；CSV 任务分析与排期，共三项工具 | `agent/tools.py` |
-| MCP 或同类标准协议 | 标准 LLM Function Calling：JSON Schema → `tool_calls` → 参数校验 → `role=tool` + `tool_call_id` → 模型继续决策 | `agent/brain.py`、`agent/runner.py` |
-| 依赖外部工具与上下文 | 实时读取 `data/library/` 与 `data/reading_tasks.csv`，工具轨迹可展开、导出 | `data/`、网页执行记录 |
-| AI 生成样板代码 | Codex 生成 Pydantic 模型、Schema、API 适配、工具实现、网页和测试；系统提示词单独维护 | `agent/tools.py`、`agent/brain.py`、`agent/prompts.py` |
-| 可运行与部署 | 网页、CLI、Windows 启动脚本、Dockerfile | `start.ps1`、`Dockerfile` |
-
-本实验采用 Function Calling，**没有实现或运行 MCP Server**；原题明确允许 MCP or similar / standard LLM function calling。协议依据：[OpenAI 官方 Function Calling 文档](https://developers.openai.com/api/docs/guides/function-calling)。
-
-## 快速运行
-
-需要 Python 3.11+，已在 Windows / Python 3.12 上验证。以下命令在 `homework1` 目录执行。
-
-从 GitHub 获取代码：
-
-```powershell
-git clone https://github.com/zeroeclipse00/Experiment1-Bring-Your-Own-Agent.git homework1
-cd homework1
-```
+需要 Python 3.11+，在项目目录执行：
 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.lock.txt
-.\.venv\Scripts\python.exe -m uvicorn agent.app:app --host 127.0.0.1 --port 8000
-```
-
-打开 <http://127.0.0.1:8000>。或者执行：
-
-```powershell
+Copy-Item .env.example .env
 powershell -ExecutionPolicy Bypass -File .\start.ps1
 ```
 
-`start.ps1` 在首次运行时创建虚拟环境并安装依赖；不修改系统执行策略。若系统默认 Python 不可用，可用 `py -3.12 -m venv .venv`。
+仅在 `.env` 尚不存在时复制示例文件，避免覆盖自己的配置。真实模式需要填写 `AGENT_MODE=live`、`LLM_API_KEY`、`LLM_MODEL`、`LLM_BASE_URL`。地址填写 API 前缀，程序追加 `/chat/completions`。服务需要支持标准工具调用及严格 JSON Schema。
 
-修改 `.env` 或 Python 源码后，在运行服务的终端按 `Ctrl+C` 停止，再执行同一条启动命令即可重启。服务启动时读取 `.env`，仅刷新网页不会重新加载配置。没有服务运行时直接启动；启动后刷新网页，确认选择“真实模型”。
+打开 <http://127.0.0.1:8000>。修改 `.env` 或 Python 代码后，在原服务终端按 Ctrl+C，再执行启动命令。刷新网页不会重新加载环境配置。日期与时间使用北京时间（UTC+8）。
 
-macOS / Linux 使用 `python3 -m venv .venv`，将上述 `.\.venv\Scripts\python.exe` 换为 `.venv/bin/python`。
+规则演示仅展示实际检索、读取和 CSV 统计，明确不调用 LLM，不生成伪装为内容推理的学习计划。三个快捷问题仅在规则演示下显示；切换模式不会改写输入框。真实模式由模型自主理解内容并调用规划工具。
 
-### 两种模式
+## 资料输入与计划输出
 
-- **规则演示（默认）**：无需密钥，真实读取文件、运行所有工具并形成摘录和排期。工具选择由确定性规则驱动，**不含 LLM，不作为真实模型自主调用的证明**。支持阿拉伯数字形式的“未来3天”“每天60分钟”和 `YYYY-MM-DD` 起始日期；未提供时用北京时间的当前日期、3 天、每天 60 分钟。
-- **真实模型**：LLM 自主理解问题、选择工具、读取上下文并总结。需要提供支持 Chat Completions Function Calling 与严格 JSON Schema 的模型服务。
+所有学习资料统一放在 `data/library/`，支持 `.md`、`.txt`、`.pdf`、`.csv` 和子目录。新增文件后刷新网页，下一次请求读取最新文件。**没有必须填写的任务 CSV，也没有两份任务表的优先级或回退逻辑。**
 
-### 连接真实模型
+CSV 是普通真实数据，例如实验测量、统计观测、课程数据集；不需要 `due_date`、`priority` 或 `estimated_minutes` 等计划字段。`analyze_csv` 自动分析列类型、缺失情况、数值统计、类别分布和样例。数据来源、单位等说明可以作为同目录的 TXT 资料。
 
-```powershell
-Copy-Item .env.example .env
-```
+最终计划由模型根据原文生成完整学习单元，作为 `create_study_plan` 的输入，经工具校验后形成输出。网页展示回答与实际工具记录，导出 JSON 包含结构化 `study_plan`，二者与输入 CSV 是不同的数据。
 
-编辑 `.env`，不要将密钥提交到 Git：
+## 如何考虑内容、完整性和难度
 
-```dotenv
-AGENT_MODE=live
-LLM_BASE_URL=https://api.openai.com/v1
-LLM_API_KEY=填写你自己的密钥
-LLM_MODEL=填写该服务支持工具调用的模型名
-LLM_TIMEOUT=60
-```
+1. 先检索资料并查看结构，再读取定义、定理、例题等原文，或统计分析真实 CSV。
+2. 模型按知识主题提炼学习单元，为每个单元填写学习目标、来源、先修单元、难度及其依据、建议用时。不得按页数等比例分配。
+3. 工具校验引用确实读取过、先修关系无循环、每日时间不超预算。完整单元放不进剩余时间时留到下一天，不在定义、证明或例题中间任意截断。单元超过整天预算时报告原因，由模型按自然学习目标细分后重排。
+4. 整份资料规划使用 `whole_material`，要求原文或数据分析和学习单元的来源范围覆盖全文。只选部分主题使用 `selected_topics`，明确返回尚未覆盖的部分。
+5. 难度、目标及用时是模型基于内容作出的学习建议；工具能验证来源、结构和预算，不能保证模型的教学判断绝对正确。未提供背景时按首次系统学习估算。
 
-`LLM_BASE_URL` 是 API 前缀，程序会追加 `/chat/completions`，不要填到接口末尾。其他 OpenAI-compatible 服务也可配置，但必须实际支持 `tools`、`tool_calls`、`strict` 与 `tool_call_id`。模型名由使用者填写，不预设账户一定可用的模型。
+例如，若原文包含概念、性质、证明与应用，计划应说明这些主题之间的关系，并对较难的推导和练习留出时间，而不是自动划成“第1–8页、第9–16页”。页码只用于定位和检查覆盖。
 
-重启服务，在网页选“真实模型”。**不能用演示记录替代课程中的真实 LLM 演示**：提交前请配置真实 API，完成至少一次含工具调用的运行，并导出 JSON 作为证据。没有配置时程序会明确报错，不会自动回退为演示。
+## 五个工具与标准协议
 
-真实模型模式会将问题及工具读取的资料发送至配置的模型服务；密钥仅用于后端鉴权，不下发浏览器或写入运行记录。
-
-## 使用示例
-
-网页支持示例问题、执行轨迹展开和 JSON 导出；每次运行是独立任务，不保存多轮聊天历史。
-
-```text
-根据本地资料，说明 Agent 的工具调用流程。
-比较资料中 MCP 与 Function Calling 的上下文接入方式。
-从2026-10-08开始，安排未来3天的阅读计划，每天60分钟。
-```
-
-第三个示例基于仓库自带的 `data/reading_tasks.csv`，固定日期便于复现：未完成任务共 **215 分钟**，3 天容量 **180 分钟**，未排完 **35 分钟**。已完成的 R05 不参与排期。放入自定义任务表后，以实际任务内容计算。到其他日期展示时，建议更新 CSV 截止日期或明确输入计划起始日期。三个快捷问题仅在“规则演示”模式显示，切换到“真实模型”时隐藏；自行输入的问题保留。
-
-CLI 同样使用相同编排循环：
-
-```powershell
-.\.venv\Scripts\python.exe -m agent "阅读 Agent 资料，从2026-10-08开始安排未来3天计划，每天60分钟" --mode demo --output output/demo-run.json
-.\.venv\Scripts\python.exe -m agent "根据资料解释 Function Calling 的流程" --mode live --output output/live-run.json
-```
-
-退出码 0 表示成功，1 表示任务未完成。JSON 包含模式、模型、问题、回答、调用参数、实际结果、轮次和耗时。
-
-## 替换自己的上下文
-
-将 UTF-8 编码的 `.md`、`.txt`、`.csv` 或文字型 `.pdf` 放入 `data/library/`，可使用子目录；刷新页面更新文件清单，下一次运行读取最新内容。项目资料是自编教学示例，**不是课程官方讲义或真实论文**。
-
-自定义阅读任务放在 `data/library/reading_tasks.csv`，分析工具优先读取该表；未放置时回退到仓库自带的 `data/reading_tasks.csv`。格式不正确时明确报错，不会悄悄改用样例数据。字段如下：
-
-| 字段 | 含义 |
+| 工具 | 实际作用 |
 | --- | --- |
-| `id` | 唯一、非空任务编号 |
-| `title` | 非空任务标题 |
-| `material` | 对应资料文件名；作为元数据，不意味着已阅读 |
-| `due_date` | `YYYY-MM-DD` 截止日期 |
-| `estimated_minutes` | 剩余分钟数，整数 1–10000 |
-| `priority` | 1–3，数字越小越优先 |
-| `status` | `todo`、`doing`、`done`；`done` 不安排 |
+| `search_materials` | 词法检索本地资料，返回命中片段与定位 |
+| `inspect_material` | 查看页数、标题线索和读取覆盖；不冒充已阅读 |
+| `read_material` | 分批读取原文，保存真实页码或行号证据 |
+| `analyze_csv` | 分析任意列结构的真实数据，不读取预制任务表 |
+| `create_study_plan` | 校验内容单元、引用、完整覆盖、先修关系与时间预算 |
 
-排期按截止日期、优先级、id 排序，可跨天拆分，单日不超过预算；标记逾期，列出尚未安排时间。`doing` 也按 CSV 的分钟数作为剩余量，不推测进度。
+系统提示词在 `agent/prompts.py`，工具和参数模型在 `agent/tools.py`、`agent/study.py`，编排循环在 `agent/runner.py`。样板、参数模型、请求适配、网页及测试使用 Codex 辅助生成。
 
-检索采用英文单词与中文双字匹配，适用于小型课程资料库；不是向量 RAG。最多扫描 80 份合规文件、单文件 5 MB、PDF 100 页；一次最多读取 80 行或 3 页、返回最多 12000 字符。任务 CSV 另外限制为 100 KB、100 条任务。大型 PDF 应拆分；扫描 PDF 需自行先 OCR。
+协议流程：JSON Schema → 模型 `tool_calls` → 参数校验和工具执行 → `role=tool` + `tool_call_id` 回传 → 模型继续阅读或回答。采用 [标准 Function Calling](https://developers.openai.com/api/docs/guides/function-calling)，不额外运行 MCP Server，符合题目允许的 MCP or similar。
 
-例如 31 页的文字型教材，只要不超过 5 MB，便在文件读取限制内。针对具体问题可检索并分批阅读相关页；这不代表把整本书一次送入模型。全文是否能放进上下文，取决于实际文字量、模型窗口和输出预留。当前最多 8 轮编排，逐次读取整本书还可能达到轮次上限，整本总结建议按章节分次处理。
+## 读取边界与资料质量
 
-## 架构与核心提示词
+最多扫描80份文件；单文件最多5 MB，PDF最多100页。一次读取最多80行或3页、最多12000字符。CSV分析最多2 MB、10000行、30列。每次请求最多24轮模型编排、64次工具调用，可以在一轮中读取多个片段。每次请求独立，不长期记忆之前读过的内容。
 
-```text
-网页 / CLI
-    ↓ 用户目标
-AgentRunner + System Prompt + 当前北京时间（UTC+8）
-    ↓ messages + tools JSON Schema
-LLM（真实模式） / 确定性驱动器（规则演示）
-    ↓ tool_calls(name, arguments, id)
-Pydantic 校验 → 白名单工具注册表 → 本地 Markdown / TXT / PDF / CSV
-    ↓ role=tool, tool_call_id, JSON 结果
-回到模型继续决策 → 最终回答 + 资料引用 + 可导出执行记录
-```
+31页文字型教材在页数限制内；整本学习计划需要按批读取全文，而不是一次把所有文件交给模型。能否处理还取决于文件编码、模型的上下文窗口和文字总量。没有自动上下文压缩；超大资料应分章处理并声明范围。
 
-核心提示词完整存于 `agent/prompts.py`，强调：先调用工具再回答、先检索再阅读、引用原文定位、区分事实与建议、忽略资料内的提示注入、遇到缺失上下文明确说明。工具失败会作为结构化结果回传，供模型修正参数。模型最多编排 8 轮、执行 24 次工具调用；至少一次工具成功才接受最终回答。
+扫描件、空文本、检测到乱码或异常字体编码的 PDF 会明确报错，不能仅凭文件名推断正文。需要先 OCR 或换用可正常提取文字的版本。`inspect_material` 的缩略信息不计作正文阅读证据。
 
-路径按解析后的绝对位置检查，限制在 `data/library`；工具不执行任意 shell 或访问任意 URL。提示词约束不是严格的事实正确性保证：真实模型仍可能错引或漏引，展示时可展开原文核对。服务设计用于个人本机，默认绑定回环地址，不含公网用户认证。
-
-## 测试
+## CLI 与测试
 
 ```powershell
+.\.venv\Scripts\python.exe -m agent "分析本地 CSV 的数据列和缺失值" --mode demo
+.\.venv\Scripts\python.exe -m agent "阅读选定教材，按完整主题和难度制定3天学习计划，每天60分钟" --mode live --output output/live-plan.json
 .\.venv\Scripts\python.exe -m pytest -q
 ```
 
-测试覆盖参数校验、路径越界、PDF 读取、扫描件反馈、CSV 格式、每日预算、逾期、外部数据变化、演示端到端、标准 Function Calling HTTP 消息往返、错误恢复与循环上限。模拟 HTTP 服务验证协议，不代表真实 LLM 已联网验证。
+测试使用独立样例目录，不读取个人教材。覆盖真实数据列分析、文件更新、参数与路径边界、PDF乱码、31页读取覆盖、内容来源、主题完整性、先修关系、预算、标准协议往返和无规划工具结果时的失败处理。
 
-仓库仅包含可运行源码、公开示例数据、测试与部署说明。`docs/`、`output/`、PDF、Word 文档、`library` 内的 CSV 以及环境密钥文件已加入忽略规则，运行记录和个人课程材料请保存在本地。
+## 本地材料与隐私
 
-## Docker 部署
+公开仓库只保存源码、公开演示笔记、测试和部署说明。`.env`、`output/`、`docs/`、PDF、Word、`library` 内 CSV 及来源旁注默认忽略。报告、个人教材、数据和运行记录留在本地。真实模式会将问题及选定工具读取的资料发送到自己配置的模型服务；密钥仅用于后端鉴权。
+
+网页默认绑定本机回环地址，不含公网用户认证。
+
+## Docker
 
 ```powershell
-Copy-Item .env.example .env
-docker build -t homework1-reading-agent .
-docker run --rm --name reading-agent -p 127.0.0.1:8000:8000 --env-file .env homework1-reading-agent
+docker build -t reading-agent .
+docker run --rm --name reading-agent -p 127.0.0.1:8000:8000 --env-file .env reading-agent
 ```
 
-打开 <http://127.0.0.1:8000>。Docker 镜像不复制 `.env`，启动时注入环境变量。镜像默认包含项目样例资料；更新资料后重建镜像，或挂载自己的 `data` 目录。
-
-## 常见问题
-
-- **代理连接失败**：先检查本机代理是否启动。若网络允许直连，可在当前 PowerShell 窗口设置 `$env:NO_PROXY='*'` 后重试安装；这只对当前进程环境生效。不要把网络或代理凭据写进代码。
-- **端口被占用**：用 `start.ps1 -Port 8001`，或修改 uvicorn 的 `--port`。
-- **401 / 403 / 429 / 404**：检查 API 密钥、账户权限或额度、模型名和 API 前缀；程序不回显响应体中的敏感信息。
-- **模型不调用工具**：确认服务真正支持 Function Calling；程序会要求获取上下文，达到轮次上限则报错。
-- **找不到资料**：试用较短关键词；检查 UTF-8 编码、文件类型、大小及 PDF 是否有文字。
+镜像不复制 `.env`。个人数据可通过只读卷挂载到 `/app/data/library`；输入是学习资料，计划结果通过网页或 CLI 导出。

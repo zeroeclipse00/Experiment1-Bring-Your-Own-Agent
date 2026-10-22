@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+import re
 from datetime import datetime
 from uuid import uuid4
 
@@ -24,19 +25,29 @@ class AgentRunner:
             {"role": "user", "content": query},
         ]
         successful = 0
+        study_plan = None
+        needs_plan = self.settings.mode == "live" and bool(re.search(r"计划|规划|安排|学习路径|schedule|study\s*plan", query, re.I))
 
         def finish(answer: str, error: str | None = None):
             return {"run_id": run_id, "mode": self.settings.mode,
                     "model": "规则驱动（无 LLM）" if self.settings.mode == "demo" else self.settings.model,
                     "created_at": now.isoformat(), "query": query, "answer": answer,
-                    "traces": traces, "elapsed_ms": round((time.perf_counter() - started) * 1000), "error": error}
+                    "traces": traces, "study_plan": study_plan,
+                    "elapsed_ms": round((time.perf_counter() - started) * 1000), "error": error}
 
         try:
             for round_number in range(1, self.settings.max_rounds + 1):
                 message = await self.brain.complete(messages, self.registry.schemas())
                 calls = message.get("tool_calls", [])
                 if not calls:
+                    failures = [t["result"]["error"] for t in traces if not t["result"]["ok"]]
+                    if failures and (not successful or (needs_plan and study_plan is None)):
+                        raise AgentError("无法基于当前资料完成可靠回答或学习计划。" + failures[-1])
                     if successful:
+                        if needs_plan and study_plan is None:
+                            messages.append(message)
+                            messages.append({"role": "user", "content": "本次要求学习计划。请先阅读/分析原文，按完整主题、难度和先修关系调用 create_study_plan；不要直接编造日程。"})
+                            continue
                         return finish(message.get("content") or "模型未生成回答。")
                     messages.append(message)
                     messages.append({"role": "user", "content": "请先成功调用至少一个工具获取实际上下文。不要凭基础知识回答。"})
@@ -49,6 +60,8 @@ class AgentRunner:
                     tick = time.perf_counter()
                     result = await asyncio.to_thread(self.registry.execute, name, raw_args)
                     successful += int(result["ok"])
+                    if name == "create_study_plan" and result["ok"]:
+                        study_plan = result["data"]
                     try:
                         args = json.loads(raw_args)
                     except ValueError:

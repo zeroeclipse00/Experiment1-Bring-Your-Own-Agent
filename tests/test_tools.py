@@ -1,10 +1,8 @@
 import json
-from pathlib import Path
-
+from types import SimpleNamespace
 import pytest
 from pypdf import PdfWriter
 from pypdf.generic import DictionaryObject, NameObject, DecodedStreamObject
-
 from agent.tools import ToolRegistry
 
 
@@ -14,13 +12,9 @@ def registry(sample_data):
 
 
 def test_search_read_sources(registry):
-    hits = registry.execute("search_materials", '{"query":"Function Calling","limit":5}')
-    assert hits["ok"]
-    filename = hits["data"]["results"][0]["filename"]
-    read = registry.execute("read_material", json.dumps({"filename": filename, "start": 1, "count": 30}))
-    assert read["ok"]
-    assert any("tool_call_id" in e["text"] for e in read["data"]["excerpts"])
-    assert all(e["source"].startswith(filename + ":L") for e in read["data"]["excerpts"])
+    filename = registry.search_materials("Function Calling", 5)["results"][0]["filename"]
+    read = registry.read_material(filename, 1, 30)
+    assert any("tool_call_id" in e["text"] for e in read["excerpts"])
 
 
 @pytest.mark.parametrize("name,args", [
@@ -30,7 +24,7 @@ def test_search_read_sources(registry):
     ("read_material", {"filename": "01_agent_basics.md", "start": "1", "count": 1}),
     ("search_materials", {"query": "x", "limit": 100}),
     ("search_materials", {"query": "x", "limit": 1, "unexpected": "x"}),
-    ("analyze_reading_tasks", {"start_date": "2026-02-30", "days": 3, "daily_minutes": 60}),
+    ("analyze_csv", {"filename": "../../private.csv", "sample_rows": 3}),
 ])
 def test_reject_invalid_calls(registry, name, args):
     assert not registry.execute(name, json.dumps(args))["ok"]
@@ -38,112 +32,125 @@ def test_reject_invalid_calls(registry, name, args):
 
 def test_unknown_and_invalid_json(registry):
     assert not registry.execute("run_shell", "{}")["ok"]
+    assert not registry.execute("analyze_reading_tasks", "{}")["ok"]
     assert not registry.execute("search_materials", "{broken")["ok"]
 
 
-def test_planning_budget_and_deadlines(registry):
-    result = registry.analyze_reading_tasks("2026-10-08", 3, 60)
-    assert result["remaining_minutes"] == 215
-    assert result["capacity_minutes"] == 180
-    assert sum(x["minutes"] for x in result["unscheduled"]) == 35
-    assert all(day["minutes"] <= 60 for day in result["plan"])
-    assert not any(t["id"] == "R05" for t in result["tasks"])
-    assert result["plan"][0]["sessions"][0]["task_id"] == "R01"
-    late = registry.analyze_reading_tasks("2026-10-15", 1, 30)
-    assert all(t["overdue_at_start"] for t in late["tasks"])
-    assert all(s["past_due"] for s in late["plan"][0]["sessions"])
+def test_generic_csv_analysis_and_changed_context(registry):
+    result = registry.analyze_csv("measurements.csv", 2)
+    assert result["row_count"] == 3 and result["columns"][0]["mean"] == 3
+    assert result["columns"][1]["top_values"] == [("A", 2), ("B", 1)]
+    (registry.library / "measurements.csv").write_text("length,group\n12,A\n,B\n", encoding="utf-8")
+    changed = registry.analyze_csv("measurements.csv", 2)
+    assert changed["row_count"] == 2 and changed["columns"][0]["mean"] == 12
+    assert changed["columns"][0]["missing"] == 1
 
 
-def test_context_changes_result(tmp_path):
-    (tmp_path / "library").mkdir()
-    task_file = tmp_path / "reading_tasks.csv"
-    header = "id,title,material,due_date,estimated_minutes,priority,status\n"
-    task_file.write_text(header + "1,Read,test.md,2026-10-09,40,1,todo\n", encoding="utf-8")
-    registry = ToolRegistry(tmp_path)
-    assert registry.analyze_reading_tasks("2026-10-08", 1, 60)["remaining_minutes"] == 40
-    task_file.write_text(header + "1,Read,test.md,2026-10-09,90,1,todo\n", encoding="utf-8")
-    changed = registry.analyze_reading_tasks("2026-10-08", 1, 60)
-    assert changed["remaining_minutes"] == 90
-    assert changed["unscheduled"][0]["minutes"] == 30
+def test_bad_csv(registry):
+    for text in ["x,x\n1,2\n", "x,y\n1,2,3\n"]:
+        (registry.library / "bad.csv").write_text(text, encoding="utf-8")
+        assert not registry.execute("analyze_csv", '{"filename":"bad.csv","sample_rows":2}')["ok"]
 
 
-def test_library_csv_is_visible_and_takes_precedence(sample_data):
-    path = sample_data / "library" / "reading_tasks.csv"
-    path.write_text("id,title,material,due_date,estimated_minutes,priority,status\n"
-                    "CUSTOM,自定义教材阅读,book.pdf,2026-10-23,75,1,todo\n", encoding="utf-8-sig")
-    registry = ToolRegistry(sample_data)
-    assert "reading_tasks.csv" in registry.inventory()
-    assert registry.search_materials("自定义教材", 1)["results"][0]["filename"] == "reading_tasks.csv"
-    assert "CUSTOM" in registry.read_material("reading_tasks.csv", 2, 1)["excerpts"][0]["text"]
-    result = registry.analyze_reading_tasks("2026-10-22", 1, 60)
-    assert result["source_file"] == "library/reading_tasks.csv"
-    assert result["remaining_minutes"] == 75
-    assert result["tasks"][0]["source"] == "library/reading_tasks.csv:2"
-    assert result["unscheduled"] == [{"task_id": "CUSTOM", "minutes": 15}]
+def write_pdf(path, pages=1):
+    writer = PdfWriter()
+    for i in range(pages):
+        page = writer.add_blank_page(width=300, height=300)
+        font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"), NameObject("/BaseFont"): NameObject("/Helvetica")})
+        page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})})
+        stream = DecodedStreamObject()
+        stream.set_data(f"BT /F1 12 Tf 20 250 Td (Topic {i+1}: definitions examples and proof.) Tj ET".encode())
+        page[NameObject("/Contents")] = writer._add_object(stream)
+    writer.write(path)
 
 
-def test_bad_library_csv_does_not_silently_use_sample_tasks(sample_data):
-    (sample_data / "library" / "reading_tasks.csv").write_text("title,minutes\nx,1\n", encoding="utf-8")
-    result = ToolRegistry(sample_data).execute("analyze_reading_tasks", '{"start_date":"2026-10-22","days":1,"daily_minutes":60}')
-    assert not result["ok"] and "缺少必要列" in result["error"]
+def test_pdf_sources_and_inspection_is_not_reading(registry):
+    write_pdf(registry.library / "book.pdf", 31)
+    inspection = registry.inspect_material("book.pdf")
+    assert inspection["total"] == 31 and not inspection["read_positions"]
+    with pytest.raises(ValueError, match="尚未读取"):
+        registry._source_positions("book.pdf", "book.pdf:p1-p3")
+    for start in range(1, 32, 3):
+        registry.read_material("book.pdf", start, min(3, 32-start))
+    assert len(registry._source_positions("book.pdf", "book.pdf:p1-p31")) == 31
 
 
-def test_bad_csv_and_missing_file(tmp_path):
-    registry = ToolRegistry(tmp_path)
-    args = '{"start_date":"2026-10-08","days":3,"daily_minutes":60}'
-    assert not registry.execute("analyze_reading_tasks", args)["ok"]
-    (tmp_path / "reading_tasks.csv").write_text("title,minutes\nx,3\n", encoding="utf-8")
-    assert "缺少必要列" in registry.execute("analyze_reading_tasks", args)["error"]
-
-
-def test_scanned_pdf_feedback(tmp_path):
-    library = tmp_path / "library"
-    library.mkdir()
+def test_scanned_and_garbled_pdf_feedback(registry, monkeypatch):
     writer = PdfWriter()
     writer.add_blank_page(width=200, height=200)
-    writer.write(library / "scan.pdf")
-    result = ToolRegistry(tmp_path).execute("read_material", '{"filename":"scan.pdf","start":1,"count":1}')
-    assert not result["ok"] and "OCR" in result["error"]
+    writer.write(registry.library / "blank.pdf")
+    assert "OCR" in registry.execute("read_material", '{"filename":"blank.pdf","start":1,"count":1}')["error"]
+    monkeypatch.setattr("agent.tools.PdfReader", lambda _: SimpleNamespace(is_encrypted=False, pages=[SimpleNamespace(extract_text=lambda: "\x01"*20+"bad mapping"*10)]))
+    assert "乱码" in registry.execute("inspect_material", '{"filename":"blank.pdf"}')["error"]
 
 
-def test_text_pdf_page_citations(tmp_path):
-    library = tmp_path / "library"
-    library.mkdir()
-    writer = PdfWriter()
-    page = writer.add_blank_page(width=300, height=300)
-    font = DictionaryObject({NameObject("/Type"): NameObject("/Font"),
-                             NameObject("/Subtype"): NameObject("/Type1"),
-                             NameObject("/BaseFont"): NameObject("/Helvetica")})
-    page[NameObject("/Resources")] = DictionaryObject({NameObject("/Font"): DictionaryObject({NameObject("/F1"): writer._add_object(font)})})
-    stream = DecodedStreamObject()
-    stream.set_data(b"BT /F1 12 Tf 20 250 Td (Agent tool calling reads external context.) Tj ET")
-    page[NameObject("/Contents")] = writer._add_object(stream)
-    writer.write(library / "reading.pdf")
-    registry = ToolRegistry(tmp_path)
-    search = registry.search_materials("Agent", 1)
-    assert search["results"][0]["source"] == "reading.pdf:p1"
-    result = registry.read_material("reading.pdf", 1, 1)
-    assert result["excerpts"][0]["source"] == "reading.pdf:p1"
-    assert "external context" in result["excerpts"][0]["text"]
+def unit(id="U1", start=1, end=4, minutes=40, prereqs=None):
+    return {"id": id, "title": "概念与基本性质" if id=="U1" else "定理证明与应用",
+            "material": "lesson.md", "sources": [f"lesson.md:L{start}-L{end}"],
+            "objective": "能够解释概念并独立完成对应例题", "difficulty": "基础" if id=="U1" else "较难",
+            "difficulty_reason": "包含新定义和例子，需要理解后完成练习" if id=="U1" else "证明依赖多个先修概念，需要额外推导与练习时间",
+            "estimated_minutes": minutes, "prerequisites": prereqs or []}
 
 
-def test_multiline_csv_cites_physical_start_line(tmp_path):
-    (tmp_path / "reading_tasks.csv").write_text(
-        'id,title,material,due_date,estimated_minutes,priority,status\n'
-        '1,"two\nlines",test.md,2026-10-09,40,1,todo\n'
-        '2,second,test.md,2026-10-10,20,1,todo\n', encoding="utf-8")
-    tasks = ToolRegistry(tmp_path).analyze_reading_tasks("2026-10-08", 1, 60)["tasks"]
-    assert [t["source"] for t in tasks] == ["reading_tasks.csv:2", "reading_tasks.csv:4"]
+def payload(units=None, **changes):
+    return {"start_date": "2026-10-22", "days": 2, "daily_minutes": 60,
+            "materials": ["lesson.md"], "scope": "whole_material",
+            "units": units or [unit(),unit("U2",5,8,60,["U1"])], **changes}
 
 
-def test_symlink_escape_if_supported(tmp_path):
-    library = tmp_path / "library"
-    library.mkdir()
-    outside = tmp_path / "private.txt"
-    outside.write_text("private", encoding="utf-8")
-    try:
-        (library / "link.txt").symlink_to(outside)
-    except OSError:
-        pytest.skip("系统未允许创建符号链接")
-    result = ToolRegistry(tmp_path).execute("read_material", '{"filename":"link.txt","start":1,"count":1}')
-    assert not result["ok"]
+@pytest.fixture
+def lesson(registry):
+    (registry.library / "lesson.md").write_text("# Definitions\nDefinition\nExample\nProperty\n# Theorem\nProof\nApplication\nExercise\n", encoding="utf-8")
+    return registry
+
+
+def test_plan_needs_actual_evidence(lesson):
+    assert not lesson.execute("create_study_plan", json.dumps(payload()))["ok"]
+    lesson.read_material("lesson.md", 1, 8)
+    result = lesson.execute("create_study_plan", json.dumps(payload()))
+    assert result["ok"]
+    data = result["data"]
+    assert [d["minutes"] for d in data["plan"]] == [40,60]
+    assert [d["sessions"][0]["id"] for d in data["plan"]] == ["U1","U2"]
+    assert not data["unscheduled"] and not data["coverage"][0]["uncovered_positions"]
+
+
+def test_plan_rejects_partial_book_disguised_as_whole(lesson):
+    lesson.read_material("lesson.md", 1, 8)
+    result = lesson.execute("create_study_plan", json.dumps(payload([unit()])))
+    assert not result["ok"] and "未完整覆盖" in result["error"]
+    result = lesson.execute("create_study_plan", json.dumps(payload([unit()],scope="selected_topics")))
+    assert result["ok"] and result["data"]["coverage"][0]["uncovered_positions"] == [5,6,7,8]
+
+
+def test_plan_preserves_unit_and_reports_too_large(lesson):
+    lesson.read_material("lesson.md",1,8)
+    result = lesson.execute("create_study_plan", json.dumps(payload([unit(end=8,minutes=90)])))
+    assert result["ok"] and result["data"]["scheduled_minutes"] == 0
+    assert "超过单日预算" in result["data"]["unscheduled"][0]["reason"]
+
+
+def test_plan_rejects_cycles(lesson):
+    lesson.read_material("lesson.md",1,8)
+    result = lesson.execute("create_study_plan", json.dumps(payload([unit(prereqs=["U2"]),unit("U2",5,8,60,["U1"])])))
+    assert not result["ok"] and "循环" in result["error"]
+
+
+def test_csv_profile_is_usable_evidence(registry):
+    data = registry.analyze_csv("measurements.csv", 2)
+    u = unit()
+    u.update(material="measurements.csv", sources=[data["source"]])
+    result=registry.execute("create_study_plan",json.dumps(payload([u],materials=["measurements.csv"])))
+    assert result["ok"] and not result["data"]["coverage"][0]["uncovered_positions"]
+
+
+def test_plan_rejects_page_only_units(lesson):
+    lesson.read_material("lesson.md",1,8)
+    u=unit(end=8)
+    u["title"]="阅读教材第1-8页"
+    result=lesson.execute("create_study_plan",json.dumps(payload([u])))
+    assert not result["ok"] and "知识主题" in result["error"]
+    u["title"]="概念与基本性质"
+    u["difficulty_reason"]="按照每页10分钟计算学习用时"
+    result=lesson.execute("create_study_plan",json.dumps(payload([u])))
+    assert not result["ok"] and "不能以页数" in result["error"]

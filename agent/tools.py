@@ -2,12 +2,14 @@
 import csv
 import json
 import re
-from datetime import date, timedelta
+from collections import Counter
+import math
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from pypdf import PdfReader
+from .study import InspectArgs, CsvArgs, PlanArgs, schedule
 
 
 class Arguments(BaseModel):
@@ -25,16 +27,12 @@ class ReadArgs(Arguments):
     count: Annotated[int, Field(ge=1, le=80, description="读取行数；PDF 最多 3 页")]
 
 
-class TaskArgs(Arguments):
-    start_date: Annotated[str, Field(pattern=r"^\d{4}-\d{2}-\d{2}$", description="计划起始日期 YYYY-MM-DD")]
-    days: Annotated[int, Field(ge=1, le=14, description="安排天数，1 到 14")]
-    daily_minutes: Annotated[int, Field(ge=10, le=480, description="每天可用阅读分钟数，10 到 480")]
-
-
 TOOL_META = {
     "search_materials": (SearchArgs, "检索本地 library 中的 Markdown、TXT、PDF、CSV 资料，返回带定位的片段；不是联网搜索。"),
     "read_material": (ReadArgs, "读取指定课程资料的原文行或 PDF 页，返回可引用来源。资料问答应先检索再阅读。"),
-    "analyze_reading_tasks": (TaskArgs, "优先解析 library/reading_tasks.csv；缺少时读取 data/reading_tasks.csv。统计剩余工作量，按截止日期和优先级分配每日阅读时间。"),
+    "inspect_material": (InspectArgs, "查看资料结构、页数或章节线索。只用于导航，不能代替阅读原文；发现乱码会报错。"),
+    "analyze_csv": (CsvArgs, "分析任意真实 CSV 数据，返回列类型、缺失值、数值统计、类别分布和样例；不要求任务表格式。"),
+    "create_study_plan": (PlanArgs, "将模型从已读资料中提炼的完整主题、目标、难度及先修关系编排成学习计划。检查来源是否真实读取、全文覆盖和每日预算；不接收预制任务 CSV，不按页数均分。"),
 }
 
 
@@ -42,6 +40,8 @@ class ToolRegistry:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir.resolve()
         self.library = (self.data_dir / "library").resolve()
+        self._cache = {}
+        self._covered = {}
 
     def schemas(self) -> list[dict]:
         return [
@@ -55,11 +55,11 @@ class ToolRegistry:
     def execute(self, name: str, raw_args: str) -> dict:
         if name not in TOOL_META:
             return {"ok": False, "error": "未知工具"}
-        if len(raw_args) > 4000:
+        if len(raw_args) > (64000 if name == "create_study_plan" else 4000):
             return {"ok": False, "error": "参数过长"}
         try:
             args = TOOL_META[name][0].model_validate_json(raw_args)
-            result = getattr(self, name)(**args.model_dump())
+            result = self.create_study_plan(args) if name == "create_study_plan" else getattr(self, name)(**args.model_dump())
             return {"ok": True, "data": result}
         except ValidationError as exc:
             errors = [{"field": ".".join(map(str, e["loc"])), "message": e["msg"]}
@@ -84,6 +84,9 @@ class ToolRegistry:
         return target
 
     def _units(self, path: Path) -> list[str]:
+        key = (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+        if key in self._cache:
+            return self._cache[key]
         if path.suffix.lower() == ".pdf":
             reader = PdfReader(path)
             if reader.is_encrypted:
@@ -93,8 +96,15 @@ class ToolRegistry:
             pages = [(page.extract_text() or "").strip() for page in reader.pages]
             if not any(pages):
                 raise ValueError("PDF 无可提取文字，扫描件需要先 OCR")
+            text = "".join(pages)
+            controls = sum(ord(c) < 32 and c not in "\n\r\t" for c in text)
+            if controls / max(1, len(text)) > 0.008 or text.count("\ufffd") / max(1, len(text)) > 0.01:
+                raise ValueError("PDF 文字提取存在乱码或字体编码异常，无法可靠理解内容。请先 OCR 或换用可正常提取的文本版本。")
+            self._cache[key] = pages
             return pages
-        return path.read_text(encoding="utf-8-sig").splitlines()
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+        self._cache[key] = lines
+        return lines
 
     def inventory(self) -> list[str]:
         if not self.library.is_dir():
@@ -124,8 +134,8 @@ class ToolRegistry:
             path = self._safe_file(filename)
             try:
                 units = self._units(path)
-            except Exception:
-                skipped.append(filename)
+            except Exception as exc:
+                skipped.append({"filename": filename, "reason": str(exc) if isinstance(exc, ValueError) else "资料解析失败"})
                 continue
             best = None
             for index, unit in enumerate(units):
@@ -157,6 +167,8 @@ class ToolRegistry:
         for i in range(start - 1, min(start - 1 + count, len(units))):
             text = units[i][:max(0, 12000 - chars)]
             selected.append({"source": f"{filename}:p{i + 1}" if is_pdf else f"{filename}:L{i + 1}", "text": text})
+            if len(text) == len(units[i]):
+                self._covered.setdefault(filename, set()).add(i + 1)
             chars += len(text)
             if chars >= 12000:
                 break
@@ -164,64 +176,98 @@ class ToolRegistry:
                 "excerpts": selected, "truncated": chars >= 12000,
                 "next_start": start + len(selected) if start + len(selected) <= len(units) else None}
 
-    def analyze_reading_tasks(self, start_date: str, days: int, daily_minutes: int) -> dict:
-        start = date.fromisoformat(start_date)
-        library_tasks = self.library / "reading_tasks.csv"
-        candidate = library_tasks if library_tasks.exists() or library_tasks.is_symlink() else self.data_dir / "reading_tasks.csv"
-        path = candidate.resolve()
-        if not path.is_relative_to(self.data_dir) or not path.is_file():
-            raise ValueError("缺少 library/reading_tasks.csv 或 data/reading_tasks.csv，或路径不合法")
-        source_file = path.relative_to(self.data_dir).as_posix()
-        if path.stat().st_size > 100_000:
-            raise ValueError("CSV 不能超过 100 KB")
-        with path.open(encoding="utf-8-sig", newline="") as file:
-            reader = csv.DictReader(file)
-            required = {"id", "title", "material", "due_date", "estimated_minutes", "priority", "status"}
-            if not reader.fieldnames or not required.issubset(reader.fieldnames):
-                raise ValueError("CSV 缺少必要列：" + ", ".join(sorted(required)))
-            rows, previous_line = [], 1
+    def inspect_material(self, filename: str) -> dict:
+        path = self._safe_file(filename)
+        units = self._units(path)
+        pdf = path.suffix.lower() == ".pdf"
+        if pdf:
+            structure = [{"start": i + 1, "source": f"{filename}:p{i + 1}",
+                          "characters": len(text), "preview": text[:180]}
+                         for i, text in enumerate(units)]
+        else:
+            structure = [{"start": i + 1, "source": f"{filename}:L{i + 1}", "heading": text[:180]}
+                         for i, text in enumerate(units)
+                         if re.match(r"^#{1,6}\s|^第.+[章节]|^\d+(?:\.\d+)+\s", text)]
+        return {"filename": filename, "unit": "page" if pdf else "line", "total": len(units),
+                "structure": structure[:100], "read_positions": sorted(self._covered.get(filename, set())),
+                "note": "导航信息，不表示已阅读全文。先读取相关原文；整份资料计划需要完整阅读或分析覆盖。"}
+
+    def analyze_csv(self, filename: str, sample_rows: int) -> dict:
+        path = self._safe_file(filename)
+        if path.suffix.lower() != ".csv":
+            raise ValueError("analyze_csv 只接受 CSV 资料")
+        if path.stat().st_size > 2_000_000:
+            raise ValueError("CSV 分析最多支持 2 MB，请拆分")
+        with path.open(encoding="utf-8-sig", newline="") as stream:
+            reader = csv.DictReader(stream)
+            columns = reader.fieldnames
+            if not columns or len(columns) > 30 or len(columns) != len(set(columns)) or any(not c.strip() for c in columns):
+                raise ValueError("CSV 需有非空且不重复的表头，最多30列")
+            rows = []
             for row in reader:
-                rows.append((previous_line + 1, row))
-                previous_line = reader.line_num
-        if len(rows) > 100:
-            raise ValueError("CSV 最多支持 100 条任务")
-        tasks, ids = [], set()
-        for line, row in rows:
-            try:
-                if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", row["due_date"]):
-                    raise ValueError()
-                due = date.fromisoformat(row["due_date"])
-                minutes, priority = int(row["estimated_minutes"]), int(row["priority"])
-                status = row["status"].strip()
-                if not row["id"] or row["id"] in ids or not row["title"]:
-                    raise ValueError()
-                if len(row["id"]) > 64 or len(row["title"]) > 200 or len(row["material"]) > 200:
-                    raise ValueError()
-                if not 1 <= minutes <= 10000 or not 1 <= priority <= 3 or status not in {"todo", "doing", "done"}:
-                    raise ValueError()
-                ids.add(row["id"])
-            except (ValueError, TypeError, KeyError):
-                raise ValueError(f"CSV 第 {line} 行非法：检查唯一 id、日期、分钟数、优先级 1-3 和状态 todo/doing/done") from None
-            if status == "done":
-                continue
-            tasks.append({"id": row["id"], "title": row["title"], "material": row["material"],
-                          "due_date": due.isoformat(), "estimated_minutes": minutes, "priority": priority,
-                          "status": status, "overdue_at_start": due < start,
-                          "source": f"{source_file}:{line}"})
-        tasks.sort(key=lambda t: (t["due_date"], t["priority"], t["id"]))
-        remaining = {t["id"]: t["estimated_minutes"] for t in tasks}
-        plan = []
-        for offset in range(days):
-            day, budget, sessions = start + timedelta(days=offset), daily_minutes, []
-            for task in tasks:
-                spent = min(remaining[task["id"]], budget)
-                if spent:
-                    sessions.append({"task_id": task["id"], "title": task["title"], "minutes": spent,
-                                     "past_due": day.isoformat() > task["due_date"], "source": task["source"]})
-                    budget -= spent
-                    remaining[task["id"]] -= spent
-            plan.append({"date": day.isoformat(), "minutes": daily_minutes - budget, "sessions": sessions})
-        return {"source_file": source_file, "tasks": tasks, "remaining_minutes": sum(t["estimated_minutes"] for t in tasks),
-                "capacity_minutes": days * daily_minutes, "daily_minutes": daily_minutes, "plan": plan,
-                "unscheduled": [{"task_id": key, "minutes": value} for key, value in remaining.items() if value],
-                "policy": "截止日期优先，同日 priority 数字越小越优先；可跨天拆分；doing 的分钟数视为剩余用时"}
+                if None in row or any(v is None for v in row.values()):
+                    raise ValueError(f"CSV 第 {reader.line_num} 行的列数与表头不一致")
+                rows.append(row)
+                if len(rows) > 10000:
+                    raise ValueError("CSV 分析最多支持10000条记录")
+        if not rows:
+            raise ValueError("CSV 没有数据记录")
+        stats = []
+        for column in columns:
+            values = [r[column].strip() for r in rows if r[column].strip()]
+            numbers = []
+            for v in values:
+                try:
+                    number = float(v)
+                    if not math.isfinite(number):
+                        break
+                    numbers.append(number)
+                except ValueError:
+                    break
+            item = {"column": column, "missing": len(rows) - len(values), "distinct": len(set(values))}
+            if values and len(numbers) == len(values):
+                item.update({"type": "numeric", "min": min(numbers), "max": max(numbers),
+                             "mean": math.fsum(number / len(numbers) for number in numbers)})
+            else:
+                item.update({"type": "text", "top_values": [(v[:120], n) for v, n in Counter(values).most_common(8)]})
+            stats.append(item)
+        total = len(self._units(path))
+        self._covered[filename] = set(range(1, total + 1))
+        source = f"{filename}:L1-L{total}"
+        return {"filename": filename, "source": source, "row_count": len(rows), "columns": stats,
+                "sample": [{key: value[:400] for key, value in row.items()} for row in rows[:sample_rows]],
+                "coverage": "统计扫描了全部记录；返回的是统计及样例，不是预制学习任务。"}
+
+    def _source_positions(self, filename: str, source: str) -> set[int]:
+        prefix = "p" if Path(filename).suffix.lower() == ".pdf" else "L"
+        match = re.fullmatch(re.escape(filename) + ":" + prefix + r"(\d+)(?:-" + prefix + r"?(\d+))?", source)
+        if not match:
+            raise ValueError("学习单元来源必须是实际文件的页码或行号，例如 book.pdf:p1-p3")
+        start, end = int(match[1]), int(match[2] or match[1])
+        total = len(self._units(self._safe_file(filename)))
+        if not 1 <= start <= end <= total:
+            raise ValueError("学习单元引用范围超出实际资料")
+        positions = set(range(start, end + 1))
+        if not positions <= self._covered.get(filename, set()):
+            raise ValueError("学习单元引用了尚未读取或分析的内容，请先调用 read_material / analyze_csv")
+        return positions
+
+    def create_study_plan(self, args: PlanArgs) -> dict:
+        result = schedule(args)
+        represented = {name: set() for name in args.materials}
+        for unit in args.units:
+            for source in unit.sources:
+                represented[unit.material].update(self._source_positions(unit.material, source))
+        coverage = []
+        for name in args.materials:
+            units = self._units(self._safe_file(name))
+            needed = {i + 1 for i, text in enumerate(units) if text.strip()}
+            missing = needed - represented[name]
+            if args.scope == "whole_material" and missing:
+                raise ValueError(f"整份资料计划尚未完整覆盖 {name}，缺少位置 {sorted(missing)[:40]}；请继续读取并补充内容单元。")
+            coverage.append({"filename": name, "total_positions": len(needed),
+                             "represented_positions": len(represented[name] & needed),
+                             "uncovered_positions": sorted(missing), "scope": args.scope})
+        result["coverage"] = coverage
+        return result
+
