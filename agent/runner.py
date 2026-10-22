@@ -4,7 +4,7 @@ import time
 from datetime import datetime
 from uuid import uuid4
 
-from .brain import AgentError, Brain, DemoBrain, LiveBrain, SHANGHAI
+from .brain import AgentError, Brain, DemoBrain, LiveBrain, BEIJING_TZ
 from .config import Settings
 from .prompts import SYSTEM_PROMPT
 from .tools import ToolRegistry
@@ -17,10 +17,10 @@ class AgentRunner:
         self.brain = brain or (DemoBrain() if settings.mode == "demo" else LiveBrain(settings))
 
     async def run(self, query: str) -> dict:
-        now = datetime.now(SHANGHAI)
+        now = datetime.now(BEIJING_TZ)
         run_id, started, traces = uuid4().hex[:12], time.perf_counter(), []
         messages = [
-            {"role": "system", "content": SYSTEM_PROMPT + f"\n当前日期：{now.date().isoformat()}，时区 Asia/Shanghai。"},
+            {"role": "system", "content": SYSTEM_PROMPT + f"\n当前北京时间：{now.strftime('%Y-%m-%d %H:%M:%S')}（UTC+8）。"},
             {"role": "user", "content": query},
         ]
         successful = 0

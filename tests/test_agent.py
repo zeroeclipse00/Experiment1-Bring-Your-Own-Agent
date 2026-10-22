@@ -29,6 +29,9 @@ def test_live_function_call_wire_and_error_recovery():
         assert request.url.path == "/v1/chat/completions"
         assert request.headers["Authorization"] == "Bearer test-only-key"
         assert all(t["function"]["strict"] for t in payload["tools"])
+        assert "当前北京时间：" in payload["messages"][0]["content"]
+        assert "UTC+8" in payload["messages"][0]["content"]
+        assert "Asia/Shanghai" not in payload["messages"][0]["content"]
         if len(requests) == 1:
             message = {"role": "assistant", "content": None, "tool_calls": [
                 {"id": "bad", "type": "function", "function": {"name": "read_material", "arguments": '{"filename":"../../.env","start":1,"count":1}'}},
@@ -50,6 +53,7 @@ def test_live_function_call_wire_and_error_recovery():
     settings = Settings(mode="live", api_key="test-only-key", model="mock-model")
     result = asyncio.run(AgentRunner(settings, LiveBrain(settings, httpx.MockTransport(respond))).run("解释 Agent 工具调用"))
     assert not result["error"] and len(requests) == 3
+    assert result["created_at"].endswith("+08:00")
     assert len(result["traces"]) == 3
     assert result["traces"][0]["result"]["ok"] is False
 

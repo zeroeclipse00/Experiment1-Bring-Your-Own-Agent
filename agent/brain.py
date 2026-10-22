@@ -7,7 +7,7 @@ import httpx
 
 from .config import Settings
 
-SHANGHAI = timezone(timedelta(hours=8))
+BEIJING_TZ = timezone(timedelta(hours=8), name="北京时间")
 
 
 class AgentError(Exception):
@@ -101,7 +101,7 @@ class DemoBrain:
             days_match = re.search(r"(?:未来|接下来|连续)?\s*(\d+)\s*天", query)
             time_match = re.search(r"(?:每天|每日)\s*(\d+)\s*分钟", query)
             date_match = re.search(r"\d{4}-\d{2}-\d{2}", query)
-            args = {"start_date": date_match[0] if date_match else datetime.now(SHANGHAI).date().isoformat(),
+            args = {"start_date": date_match[0] if date_match else datetime.now(BEIJING_TZ).date().isoformat(),
                     "days": min(14, max(1, int(days_match[1]))) if days_match else 3,
                     "daily_minutes": min(480, max(10, int(time_match[1]))) if time_match else 60}
             return {"role": "assistant", "content": None,
