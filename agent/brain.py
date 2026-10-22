@@ -83,6 +83,8 @@ class DemoBrain:
                 _call("search_materials", {"query": query[:200], "limit": 5}, 1)]}
         if len(results) == 1:
             hits = results[0].get("data", {}).get("results", [])
+            if "csv" in query.casefold():
+                hits = [hit for hit in hits if hit["filename"].lower().endswith(".csv")]
             calls = []
             for i, hit in enumerate(hits[:2], 2):
                 if hit["filename"].lower().endswith(".csv"):

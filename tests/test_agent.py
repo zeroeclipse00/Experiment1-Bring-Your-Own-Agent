@@ -21,6 +21,12 @@ def test_demo_end_to_end(sample_data):
     assert result["study_plan"] is None
 
 
+def test_csv_demo_analyzes_data_instead_of_notes(sample_data):
+    result=asyncio.run(AgentRunner(Settings(data_dir=sample_data)).run("分析本地 CSV 的真实数据列与缺失值"))
+    assert not result["error"]
+    assert any(t["tool"]=="analyze_csv" and t["result"]["data"]["row_count"]==3 for t in result["traces"])
+
+
 def test_live_function_call_wire_and_error_recovery(sample_data):
     requests = []
     def respond(request):
